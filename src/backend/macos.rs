@@ -8,11 +8,20 @@ use objc2_app_kit::NSBitmapImageFileType;
 use objc2_app_kit::NSImage;
 use objc2_foundation::NSData;
 use objc2_foundation::NSString;
-use std::env;
+use std::env::current_exe;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Return the name of the current focused application.
+///
+/// # Example
+///
+/// ```
+/// use create::backend::macos::current_focus_app_name;
+///
+/// println!("{}", current_focus_app_name()); // Output: "Code"
+/// ```
 pub fn current_focus_app_name() -> String {
     unsafe {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, false as _);
@@ -34,6 +43,15 @@ pub fn current_focus_app_name() -> String {
     app_name
 }
 
+/// Return the path of the current focused application.
+///
+/// # Example
+///
+/// ```
+/// use create::backend::macos::current_focus_app_path;
+///
+/// println!("{:?}", current_focus_app_path()); // Output: "/Applications/Visual Studio Code.app"
+/// ```
 pub fn current_focus_app_path() -> PathBuf {
     unsafe {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, false as _);
@@ -60,9 +78,21 @@ pub fn current_focus_app_path() -> PathBuf {
     app_path
 }
 
+/// Return the icon file path of the current focused application.
+///
+/// - Icon will be saved as a PNG file.
+/// - Icon file name will be the same as the app name.
+///
+/// # Example
+///
+/// ```
+/// use create::backend::macos::current_focus_app_icon_path;
+///
+/// println!("{:?}", current_focus_app_icon_path()); // Output: "/Applications/THIS.app/Contents/MacOS/Code.png"
+/// ```
 pub fn current_focus_app_icon_path() -> PathBuf {
     let current_focus_app_name = current_focus_app_name();
-    let current_focus_app_icon_path = env::current_exe()
+    let current_focus_app_icon_path = current_exe()
         .unwrap()
         .parent()
         .unwrap()

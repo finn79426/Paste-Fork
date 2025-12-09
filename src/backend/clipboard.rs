@@ -1,12 +1,12 @@
+use arboard::{Clipboard, ImageData};
+use once_cell::sync::Lazy;
 use rusqlite::types::Type;
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection};
+use std::env::current_exe;
 use std::sync::{Mutex, MutexGuard};
+use std::thread;
 use std::time::Duration;
-
-use arboard::{Clipboard, ImageData};
-use once_cell::sync::Lazy;
-use std::{env, thread};
 
 use crate::backend::macos::{
     current_focus_app_icon_path, current_focus_app_name, current_focus_app_path,
@@ -19,7 +19,7 @@ type Timestamp = String;
 
 const DB_PATH: &str = "clipboard.db";
 static DB_CONN: Lazy<Mutex<Connection>> = Lazy::new(|| {
-    let exe_path = env::current_exe().unwrap();
+    let exe_path = current_exe().unwrap();
     let exe_parent = exe_path.parent().unwrap();
     let db_path = exe_parent.join(DB_PATH);
     let conn = Connection::open(db_path).unwrap();
@@ -39,10 +39,12 @@ static DB_CONN: Lazy<Mutex<Connection>> = Lazy::new(|| {
     Mutex::new(conn)
 });
 
+/// Get a connection to the SQLite database
 fn db_conn() -> MutexGuard<'static, Connection> {
     DB_CONN.lock().unwrap()
 }
 
+/// Save text to the SQLite database
 fn save_text(content: &str) -> rusqlite::Result<()> {
     let conn = db_conn();
     let source_app = current_focus_app_name();
@@ -55,6 +57,7 @@ fn save_text(content: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Save image to the SQLite database
 fn save_image(content: &ImageData) -> rusqlite::Result<()> {
     let conn = db_conn();
     let source_app = current_focus_app_name();
@@ -69,6 +72,15 @@ fn save_image(content: &ImageData) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Listen to system clipboard changes.
+/// When clipboard changes, save the latest item to the SQLite database
+/// 
+/// Example:
+/// ```
+/// use crate::backend::clipboard;
+/// 
+/// clipboard::listen(); // Start listening
+/// ```
 pub fn listen() {
     let mut clipboard = Clipboard::new().unwrap();
     let mut last_text = String::new();
@@ -98,6 +110,19 @@ pub fn listen() {
     }
 }
 
+/// Get the latest records from the SQLite database
+/// 
+/// # Arguments
+/// 
+/// * `limit` - The number of records to return
+/// 
+/// # Example:
+/// ```
+/// use crate::backend::clipboard;
+/// 
+/// let records = clipboard::get_recent_records(1);
+/// println!("{:?}", records); // Output: "Ok([("Code", "TEXT", [72, 101, 108, 108, 111], "2025-12-09 20:20:10")])"
+/// ```
 pub fn get_recent_records(
     limit: i64,
 ) -> rusqlite::Result<Vec<(SourceApp, ContentType, Content, Timestamp)>> {
@@ -137,6 +162,19 @@ pub fn get_recent_records(
     results
 }
 
+/// Search for specific text in the SQLite database
+/// 
+/// # Arguments
+/// 
+/// * `term` - The text to search for
+/// 
+/// # Example:
+/// ```
+/// use crate::backend::clipboard;
+/// 
+/// let records = clipboard::search_text("Hello World");
+/// println!("{:?}", records); // Output: "Ok([("Code", "TEXT", [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100, 33], "2025-12-09 20:22:04")])])"
+/// ```
 pub fn search_text(
     term: &str,
 ) -> rusqlite::Result<Vec<(SourceApp, ContentType, Content, Timestamp)>> {
@@ -180,8 +218,11 @@ pub fn search_text(
 pub fn run_me_for_test() {
     println!("Hello");
     db_conn();
-    println!("{:?}", current_focus_app_name());
+    println!("{:}", current_focus_app_name());
     println!("{:?}", current_focus_app_path());
     println!("{:?}", current_focus_app_icon_path());
+    println!("Test {:?}", search_text("Hello World"));
+
     listen();
+
 }

@@ -83,27 +83,33 @@ fn save_image(content: &ImageData) -> rusqlite::Result<()> {
 /// ```
 pub fn listen() {
     let mut clipboard = Clipboard::new().unwrap();
-    let mut last_text = String::new();
-    let mut last_img_hash: u64 = 0;
+
+    // `last_text` and `last_img_hash` are exclusive - whenever one has a value, the other is guaranteed to be default value.
+    let mut last_text = String::default();
+    let mut last_img_hash: u64 = u64::default();
 
     loop {
+        let focusing_app_name = current_focus_app_name();
+
+        if ["Passwords", "Keychain Access", "Bitwarden"].iter().any(|t| focusing_app_name.contains(t)) {
+            clipboard.clear().unwrap();
+            continue;
+        }
+
         if let Ok(text) = clipboard.get_text() {
-            if text != last_text {
-                save_text(&text).unwrap();
-                last_text = text;
-                last_img_hash = 0u64;
-            }
+            if text != last_text{ save_text(&text).unwrap(); }
+            last_text = text;
+            last_img_hash = u64::default();
+            
         } else if let Ok(img_data) = clipboard.get_image() {
             let img_hash = img_data
                 .bytes
                 .iter()
-                .fold(0u64, |acc, &b| acc.wrapping_add(b as u64));
+                .fold(u64::default(), |acc, &b| acc.wrapping_add(b as u64));
 
-            if img_hash != last_img_hash {
-                save_image(&img_data).unwrap();
-                last_text.clear();
-                last_img_hash = img_hash;
-            }
+            if img_hash != last_img_hash { save_image(&img_data).unwrap() };
+            last_text = String::default();
+            last_img_hash = img_hash;
         }
 
         thread::sleep(Duration::from_millis(500));

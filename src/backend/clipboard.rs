@@ -3,17 +3,16 @@ use base64::engine::general_purpose;
 use base64::prelude::*;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use clipboard_master::{CallbackResult, ClipboardHandler, Master};
+use image::{ImageBuffer, Rgba};
 use once_cell::sync::Lazy;
 use rusqlite::types::{Type, ValueRef};
 use rusqlite::{params, Connection, Row};
 use std::env::current_exe;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::{thread, time};
 
-use crate::backend::macos::{
-    current_focus_app_icon_path, current_focus_app_name, current_focus_app_path,
-};
+use crate::backend::macos::{current_focus_app_icon_path, current_focus_app_name};
 
 pub static IS_INTERNAL_PASTE: AtomicBool = AtomicBool::new(false);
 
@@ -40,13 +39,7 @@ static DB_CONN: Lazy<Mutex<Connection>> = Lazy::new(|| {
     Mutex::new(conn)
 });
 
-#[derive(Clone, Debug)]
-pub enum ContentTypes {
-    TEXT,
-    IMAGE,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub id: i64,
     pub source_app: String,
@@ -54,6 +47,12 @@ pub struct Item {
     pub content_type: ContentTypes,
     pub content: String,
     pub timestamp: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContentTypes {
+    TEXT,
+    IMAGE,
 }
 
 struct Handler {
@@ -126,12 +125,140 @@ impl ClipboardHandler for Handler {
     }
 }
 
-/// Get a connection to the SQLite database
-fn db_conn() -> MutexGuard<'static, Connection> {
-    DB_CONN.lock().unwrap()
+/// Listen to system clipboard changes.
+/// When clipboard changes, save the latest item to the SQLite database
+///
+/// Example:
+/// ```
+/// use crate::backend::clipboard;
+///
+/// clipboard::listen(); // Start listening
+/// ```
+pub fn listen() {
+    let handler = Handler::new();
+    Master::new(handler).unwrap().run().unwrap();
 }
 
-/// Save text to the SQLite database
+/// Get all of the records from the SQLite database
+///
+/// # Example:
+/// ```
+/// use crate::backend::clipboard;
+///
+/// let records = clipboard::get_all_records();
+/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello", timestamp: 2025-12-27T17:11:28Z }])
+pub fn get_all_records() -> rusqlite::Result<Vec<Item>> {
+    let conn = db_conn();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, source_app, icon_path, content_type, content, timestamp
+         FROM history
+         ORDER BY timestamp DESC",
+    )?;
+
+    let history_iter = stmt.query_map(params![], row_to_item)?;
+
+    history_iter.collect()
+}
+
+/// Get the latest records from the SQLite database
+///
+/// # Arguments
+///
+/// * `limit` - The number of records to return
+///
+/// # Example:
+/// ```
+/// use crate::backend::clipboard;
+///
+/// let records = clipboard::get_recent_records(1);
+/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello", timestamp: 2025-12-27T17:11:28Z }])
+/// ```
+pub fn get_recent_records(limit: i64) -> rusqlite::Result<Vec<Item>> {
+    let conn = db_conn();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, source_app, icon_path, content_type, content, timestamp
+         FROM history
+         ORDER BY timestamp DESC
+         LIMIT ?1",
+    )?;
+
+    let history_iter = stmt.query_map(params![limit], row_to_item)?;
+
+    history_iter.collect()
+}
+
+/// Search for specific text in the SQLite database
+///
+/// # Arguments
+///
+/// * `term` - The text to search for
+///
+/// # Example:
+/// ```
+/// use crate::backend::clipboard;
+///
+/// let records = clipboard::search_text("Hello World");
+/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello World", timestamp: 2025-12-27T17:28:01Z }])
+/// ```
+pub fn search_text(term: &str) -> rusqlite::Result<Vec<Item>> {
+    let conn = db_conn();
+    let pattern = format!("%{}%", term);
+
+    let mut stmt = conn.prepare(
+        "SELECT id, source_app, icon_path, content_type, content, timestamp
+         FROM history
+         WHERE content_type = 'TEXT' AND content LIKE ?1
+         ORDER BY timestamp DESC
+        ",
+    )?;
+
+    let history_iter = stmt.query_map(params![pattern], row_to_item)?;
+
+    history_iter.collect()
+}
+
+/// Updates the timestamp of a specific history record.
+///
+/// This function sets the `timestamp` column of the item with the given `id`
+/// to the **current UTC time** in the `history` database table.
+///
+/// # Purpose
+/// This is typically used when a user re-pastes an old clipboard item.
+/// By updating the timestamp, the item is effectively "bumped" to the
+/// **top of the list** (marked as most recently used).
+///
+/// # Arguments
+///
+/// * `id` - The unique identifier (Primary Key) of the history record.
+///
+/// # Example
+/// ```
+/// use crate::backend::clipboard;
+///
+/// clipboard::update_timestamp(1);
+/// ```
+pub fn update_timestamp(id: i64) -> rusqlite::Result<()> {
+    let conn = db_conn();
+
+    conn.execute(
+        "UPDATE history SET timestamp = DATETIME('NOW', 'UTC') WHERE id = ?1",
+        params![id],
+    )?;
+
+    Ok(())
+}
+
+/// Saves text content to the clipboard history database.
+///
+/// It automatically captures context metadata:
+/// - `source_app`: Name of the focused application.
+/// - `icon_path`: Path to the application's icon.
+///
+/// # Arguments
+///
+/// * `content` - The text string to be saved.
 fn save_text(content: &str) -> rusqlite::Result<()> {
     let conn = db_conn();
     let source_app = current_focus_app_name();
@@ -156,30 +283,55 @@ fn save_text(content: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Save image to the SQLite database
+/// Saves image content to the clipboard history database.
+///
+/// Similar to `save_text` function.
+///
+/// # Arguments
+///
+/// * `content` - The raw image data captured from the system clipboard.
 fn save_image(content: &ImageData) -> rusqlite::Result<()> {
     let conn = db_conn();
     let source_app = current_focus_app_name();
     let icon_path = current_focus_app_icon_path().to_string_lossy().to_string();
     let content_bytes = content.bytes.as_ref();
+    let width = content.width as u32;
+    let height = content.height as u32;
+    let png_bytes = if let Some(img_buffer) =
+        ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, content_bytes)
+    {
+        let mut bytes: Vec<u8> = Vec::new();
+        if let Ok(_) = img_buffer.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png) {
+            bytes
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     let rows_affected = conn.execute(
         "UPDATE history 
          SET timestamp = DATETIME('NOW', 'UTC'), source_app = ?1, icon_path = ?2
          WHERE content_type = 'IMAGE' AND content = ?3",
-        params![source_app, icon_path, content_bytes],
+        params![source_app, icon_path, png_bytes],
     )?;
 
     if rows_affected == 0 {
         conn.execute(
             "INSERT INTO history (source_app, icon_path, content_type, content) VALUES (?1, ?2, 'IMAGE', ?3)",
-            params![source_app, icon_path, content_bytes],
+            params![source_app, icon_path, png_bytes],
         )?;
     }
 
     Ok(())
 }
 
+/// Maps a raw database row to the `Item` struct.
+///
+/// # Arguments
+///
+/// * `row` - A reference to a single row result from a rusqlite query.
 fn row_to_item(row: &Row) -> rusqlite::Result<Item> {
     let id: i64 = row.get(0)?;
     let source_app: String = row.get(1)?;
@@ -219,122 +371,7 @@ fn row_to_item(row: &Row) -> rusqlite::Result<Item> {
     })
 }
 
-/// Update the timestamp of a record
-pub fn update_timestamp(id: i64) -> rusqlite::Result<()> {
-    let conn = db_conn();
-
-    conn.execute(
-        "UPDATE history SET timestamp = DATETIME('NOW', 'UTC') WHERE id = ?1",
-        params![id],
-    )?;
-
-    Ok(())
-}
-
-/// Get the latest records from the SQLite database
-///
-/// # Arguments
-///
-/// * `limit` - The number of records to return
-///
-/// # Example:
-/// ```
-/// use crate::backend::clipboard;
-///
-/// let records = clipboard::get_recent_records(1);
-/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello", timestamp: 2025-12-27T17:11:28Z }])
-/// ```
-pub fn get_recent_records(limit: i64) -> rusqlite::Result<Vec<Item>> {
-    let conn = db_conn();
-
-    let mut stmt = conn.prepare(
-        "SELECT id, source_app, icon_path, content_type, content, timestamp
-         FROM history
-         ORDER BY timestamp DESC
-         LIMIT ?1",
-    )?;
-
-    let history_iter = stmt.query_map(params![limit], row_to_item)?;
-
-    history_iter.collect()
-}
-
-/// Get all of the records from the SQLite database
-///
-/// # Example:
-/// ```
-/// use crate::backend::clipboard;
-///
-/// let records = clipboard::get_all_records();
-/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello", timestamp: 2025-12-27T17:11:28Z }])
-pub fn get_all_records() -> rusqlite::Result<Vec<Item>> {
-    let conn = db_conn();
-
-    let mut stmt = conn.prepare(
-        "SELECT id, source_app, icon_path, content_type, content, timestamp
-         FROM history
-         ORDER BY timestamp DESC",
-    )?;
-
-    let history_iter = stmt.query_map(params![], row_to_item)?;
-
-    history_iter.collect()
-}
-
-/// Listen to system clipboard changes.
-/// When clipboard changes, save the latest item to the SQLite database
-///
-/// Example:
-/// ```
-/// use crate::backend::clipboard;
-///
-/// clipboard::listen(); // Start listening
-/// ```
-pub fn listen() {
-    let handler = Handler::new();
-    Master::new(handler).unwrap().run().unwrap();
-}
-
-/// Search for specific text in the SQLite database
-///
-/// # Arguments
-///
-/// * `term` - The text to search for
-///
-/// # Example:
-/// ```
-/// use crate::backend::clipboard;
-///
-/// let records = clipboard::search_text("Hello World");
-/// println!("{:?}", records); // Output: Ok([Item { id: 1, source_app: "Code", icon_path: "/foo/bar/Code.png", content_type: TEXT, content: "Hello World", timestamp: 2025-12-27T17:28:01Z }])
-/// ```
-pub fn search_text(term: &str) -> rusqlite::Result<Vec<Item>> {
-    let conn = db_conn();
-    let pattern = format!("%{}%", term);
-
-    let mut stmt = conn.prepare(
-        "SELECT id, source_app, icon_path, content_type, content, timestamp
-         FROM history
-         WHERE content_type = 'TEXT' AND content LIKE ?1
-         ORDER BY timestamp DESC
-        ",
-    )?;
-
-    let history_iter = stmt.query_map(params![pattern], row_to_item)?;
-
-    history_iter.collect()
-}
-
-pub fn run_me_for_test() {
-    println!("Hello");
-    db_conn();
-    println!("{:}", current_focus_app_name());
-    println!("{:?}", current_focus_app_path());
-    println!("{:?}", current_focus_app_icon_path());
-    // println!("Test {:?}", search_text("Hello World"));
-
-    // listen();
-    thread::sleep(time::Duration::from_secs(3));
-    println!("{:?}", search_text("Hello World"));
-    // println!("{:?}", get_recent_records(1));
+/// Get a connection to the SQLite database
+fn db_conn() -> MutexGuard<'static, Connection> {
+    DB_CONN.lock().unwrap()
 }

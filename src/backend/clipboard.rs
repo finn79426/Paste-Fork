@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 
 use crate::backend::macos::{current_focus_app_icon_path, current_focus_app_name};
 
+// A simple boolean lock that designed for loop prevention
+// Caller should use this lock proactively notify the `ClipboardHandler` that subsequent clipboard changes will originate internally.
 pub static IS_INTERNAL_PASTE: AtomicBool = AtomicBool::new(false);
 
 const DB_PATH: &str = "clipboard.db";
@@ -97,13 +99,14 @@ impl ClipboardHandler for Handler {
     /// 3. Persistence
     ///    Save the clipboard contents to the SQLite database.
     fn on_clipboard_change(&mut self) -> CallbackResult {
-        // If the "system clipboard has changed" event is triggered by our own action, do not save anything to the database.
+        // If the clipboard changed event is triggered by our own action
+        // DO NOT save anything to the database.
         // Because the event is triggered due to user selected a clipboard item in our Dioxus App.
         if IS_INTERNAL_PASTE.swap(false, Ordering::Relaxed) {
             return CallbackResult::Next;
         }
 
-        // If the "system clipboard has changed" event is triggered from a password manager app
+        // If the clipboard changed event is triggered from a password manager app
         // DO NOT save anything to the database
         const IGNORED_APPS: &[&str] = &["Passwords", "Keychain Access", "Bitwarden"];
         let current_focus_app = current_focus_app_name();
@@ -124,6 +127,7 @@ impl ClipboardHandler for Handler {
             }
         }
 
+        // Notify the item has been saved to the database
         self.ui_notify_tx.send(()).unwrap();
 
         CallbackResult::Next
@@ -133,11 +137,16 @@ impl ClipboardHandler for Handler {
 /// Listen to system clipboard changes.
 /// When clipboard changes, save the latest item to the SQLite database
 ///
+/// # Arguments
+///
+/// * `tx` - The channel to notify the item has been saved to the database
+/// 
 /// Example:
 /// ```
 /// use crate::backend::clipboard;
 ///
-/// clipboard::listen(); // Start listening
+/// let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+/// clipboard::listen(tx); // Start listening
 /// ```
 pub fn listen(tx: mpsc::UnboundedSender<()>) {
     let handler = Handler::new(tx);
@@ -307,7 +316,10 @@ fn save_image(content: &ImageData) -> rusqlite::Result<()> {
     {
         let mut bytes: Vec<u8> = Vec::new();
 
-        if img_buffer.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png).is_ok() {
+        if img_buffer
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .is_ok()
+        {
             bytes
         } else {
             Vec::new()

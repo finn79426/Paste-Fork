@@ -1,8 +1,7 @@
 mod backend;
 
 use arboard::Clipboard;
-use dioxus::html::g::visibility;
-use dioxus::html::{g::to, input_data::keyboard_types::Key};
+use dioxus::html::{input_data::keyboard_types::Key};
 use dioxus::prelude::*;
 use dioxus_desktop::{
     tao::dpi::{LogicalPosition, LogicalSize},

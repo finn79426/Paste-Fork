@@ -2,6 +2,8 @@
 
 This is a macOS application written using the [Dioxus Framework](https://dioxuslabs.com/), designed to replicate the functionality of [Paste](https://pasteapp.io/).
 
+![demo](demo.png)
+
 ## Features
 
 - Persistent clipboard history.
